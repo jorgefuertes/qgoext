@@ -1,6 +1,6 @@
 use zed_extension_api::{
     self as zed, settings::LspSettings, Architecture, Command, DownloadedFileType,
-    GithubReleaseOptions, LanguageServerId, Os, Result, Worktree,
+    LanguageServerId, Os, Result, Worktree,
 };
 
 const SERVER_NAME: &str = "qgoext";
@@ -71,13 +71,13 @@ impl Qgoext {
     }
 
     fn download_proxy(&mut self) -> Result<String> {
-        let release = zed::latest_github_release(
-            GITHUB_REPO,
-            GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
+        // Pin the proxy version to the extension version. This sidesteps
+        // GitHub's /releases/latest endpoint (which has been observed to
+        // return 404 right after a release is published) and guarantees
+        // the wire-protocol expectations the extension was built against
+        // match the binary it downloads.
+        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let release = zed::github_release_by_tag_name(GITHUB_REPO, &tag)?;
 
         let (os, arch) = zed::current_platform();
         let suffix = match (os, arch) {
