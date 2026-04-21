@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"go.lsp.dev/protocol"
 )
@@ -58,7 +59,38 @@ func (p *Proxy) handleCodeLens(ctx context.Context, req *message) {
 	}
 
 	synth := synthesizeLenses(params.TextDocument.URI, syms)
-	p.sendResultResponse(req.ID, append(upstream, synth...))
+	resolved := p.resolveAllInParallel(ctx, synth)
+	p.sendResultResponse(req.ID, append(upstream, resolved...))
+}
+
+// resolveAllInParallel turns a list of unresolved lenses into resolved ones
+// by issuing references / implementations in parallel, throttled by the
+// shared semaphore. Zed renders the actions menu using lens.command.title,
+// so unresolved lenses (command == nil) display as "Unknown command";
+// resolving up-front is required for correct titles.
+func (p *Proxy) resolveAllInParallel(ctx context.Context, lenses []protocol.CodeLens) []protocol.CodeLens {
+	out := make([]protocol.CodeLens, len(lenses))
+	var wg sync.WaitGroup
+	for i := range lenses {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			data, ok := parseOurLensData(lenses[i].Data)
+			if !ok {
+				out[i] = lenses[i]
+				return
+			}
+			lens := lenses[i]
+			resolved, err := p.resolveOurLens(ctx, &lens, data)
+			if err != nil {
+				out[i] = lenses[i]
+				return
+			}
+			out[i] = *resolved
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // synthesizeLenses walks the symbol tree and emits one or two unresolved
