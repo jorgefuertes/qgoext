@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.lsp.dev/protocol"
@@ -11,8 +12,9 @@ import (
 
 // enrichBudget bounds how long we wait for the parallel reference and
 // implementation sub-requests. The base hover is not bound by this; gopls
-// decides its own deadline.
-const enrichBudget = 500 * time.Millisecond
+// decides its own deadline. References can be slow on large projects, so
+// the budget is generous; refs and impls run concurrently and share it.
+const enrichBudget = 3 * time.Second
 
 // handleHover takes a request the editor sent to us, obtains the base
 // hover from gopls, augments its markdown with reference / implementation
@@ -56,8 +58,18 @@ func enrichHoverPayload(
 	subCtx, cancel := context.WithTimeout(ctx, enrichBudget)
 	defer cancel()
 
-	refs := p.referenceCount(subCtx, params.TextDocument.URI, params.Position)
-	impls := p.implementationCount(subCtx, params.TextDocument.URI, params.Position)
+	var refs, impls int
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		refs = p.referenceCount(subCtx, params.TextDocument.URI, params.Position)
+	}()
+	go func() {
+		defer wg.Done()
+		impls = p.implementationCount(subCtx, params.TextDocument.URI, params.Position)
+	}()
+	wg.Wait()
 
 	tail := formatCountsLine(refs, impls)
 	if tail == "" {
