@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            goos: darwin
+            goarch: arm64
+            runner: macos-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            goos: darwin
+            goarch: amd64
+            runner: macos-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            goos: linux
+            goarch: arm64
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            goos: windows
+            goarch: amd64
+            runner: ubuntu-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: proxy/go.sum
+
+      - name: build
+        working-directory: proxy
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          out="dist/qgoext-proxy"
+          if [ "${{ matrix.goos }}" = "windows" ]; then out="${out}.exe"; fi
+          go build -trimpath -ldflags='-s -w' -o "$out" ./cmd/qgoext-proxy
+
+      - name: package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        working-directory: proxy/dist
+        run: tar -czf "qgoext-proxy-${{ matrix.target }}.tar.gz" qgoext-proxy
+
+      - name: package (zip)
+        if: matrix.archive == 'zip'
+        working-directory: proxy/dist
+        run: zip "qgoext-proxy-${{ matrix.target }}.zip" qgoext-proxy.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qgoext-proxy-${{ matrix.target }}
+          path: proxy/dist/qgoext-proxy-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: checksums
+        working-directory: artifacts
+        run: sha256sum qgoext-proxy-*.* > sha256sums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/qgoext-proxy-*.tar.gz
+            artifacts/qgoext-proxy-*.zip
+            artifacts/sha256sums.txt
+          fail_on_unmatched_files: true

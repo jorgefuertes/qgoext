@@ -3,3 +3,22 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Rust / Cargo
+target/
+Cargo.lock.bak
+*.wasm
+
+# Go
+proxy/bin/
+proxy/qgoext-proxy
+proxy/*.exe
+
+# Release artifacts
+dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

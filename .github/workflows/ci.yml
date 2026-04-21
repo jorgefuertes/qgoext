@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  proxy:
+    name: proxy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: proxy/go.sum
+      - name: vet
+        working-directory: proxy
+        run: go vet ./...
+      - name: test
+        working-directory: proxy
+        run: go test ./...
+      - name: build
+        working-directory: proxy
+        run: go build ./cmd/qgoext-proxy
+
+  extension:
+    name: wasm extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --target wasm32-wasip1
