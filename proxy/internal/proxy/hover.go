@@ -4,11 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"go.lsp.dev/protocol"
 )
+
+// hoverLinkLimit caps how many file links are inlined into the hover tail
+// per category. Keeping this small keeps tooltips usable; navigation to
+// unlisted entries can still be done with Zed's built-in find-all-references.
+const hoverLinkLimit = 12
 
 // enrichBudget bounds how long we wait for the parallel reference and
 // implementation sub-requests. The base hover is not bound by this; gopls
@@ -58,20 +66,20 @@ func enrichHoverPayload(
 	subCtx, cancel := context.WithTimeout(ctx, enrichBudget)
 	defer cancel()
 
-	var refs, impls int
+	var refLocs, implLocs []protocol.Location
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		refs = p.referenceCount(subCtx, params.TextDocument.URI, params.Position)
+		refLocs = p.fetchReferences(subCtx, params.TextDocument.URI, params.Position)
 	}()
 	go func() {
 		defer wg.Done()
-		impls = p.implementationCount(subCtx, params.TextDocument.URI, params.Position)
+		implLocs = p.fetchImplementations(subCtx, params.TextDocument.URI, params.Position)
 	}()
 	wg.Wait()
 
-	tail := formatCountsLine(refs, impls)
+	tail := formatHoverTail(refLocs, implLocs)
 	if tail == "" {
 		return baseResult
 	}
@@ -87,25 +95,69 @@ func enrichHoverPayload(
 	return out
 }
 
-// formatCountsLine renders the tail markdown. Returns "" when neither piece
-// of information is available (treat as "nothing to add").
-func formatCountsLine(refs, impls int) string {
-	if refs < 0 && impls < 0 {
+// formatHoverTail renders the markdown appended after the gopls hover
+// content. The tail is empty when both queries failed or returned nothing.
+//
+// Layout: a one-line summary with bold counts, then up to hoverLinkLimit
+// clickable links per category. The links use file:// URIs with the
+// 1-indexed line number as the URL fragment, the only navigation form
+// Zed's hover renderer recognises (see editor::hover_popover::open_markdown_url
+// in zed-industries/zed).
+func formatHoverTail(refs, impls []protocol.Location) string {
+	hasRefs := refs != nil
+	hasImpls := impls != nil
+	if !hasRefs && !hasImpls {
 		return ""
 	}
-	line := "\n\n---\n"
-	switch {
-	case refs < 0:
-		// refs query failed; only show implementations
-		line += fmt.Sprintf("**%s**", countLabel(impls, "implementation"))
-	case impls <= 0:
-		line += fmt.Sprintf("**%s**", countLabel(refs, "reference"))
-	default:
-		line += fmt.Sprintf("**%s** · **%s**",
-			countLabel(refs, "reference"),
-			countLabel(impls, "implementation"))
+
+	var b strings.Builder
+	b.WriteString("\n\n---\n")
+	parts := []string{}
+	if hasRefs {
+		parts = append(parts, fmt.Sprintf("**%s**", countLabel(len(refs), "reference")))
 	}
-	return line
+	if hasImpls && len(impls) > 0 {
+		parts = append(parts, fmt.Sprintf("**%s**", countLabel(len(impls), "implementation")))
+	}
+	b.WriteString(strings.Join(parts, " · "))
+
+	if hasRefs && len(refs) > 0 {
+		b.WriteString("\n\n**References**\n")
+		writeLocationList(&b, refs)
+	}
+	if hasImpls && len(impls) > 0 {
+		b.WriteString("\n\n**Implementations**\n")
+		writeLocationList(&b, impls)
+	}
+	return b.String()
+}
+
+func writeLocationList(b *strings.Builder, locs []protocol.Location) {
+	limit := hoverLinkLimit
+	if len(locs) < limit {
+		limit = len(locs)
+	}
+	for i := 0; i < limit; i++ {
+		loc := locs[i]
+		path := filepath.FromSlash(loc.URI.Filename())
+		display := fmt.Sprintf("%s:%d", filepath.Base(path), loc.Range.Start.Line+1)
+		link := buildFileLink(string(loc.URI), loc.Range.Start.Line+1)
+		fmt.Fprintf(b, "- [%s](%s)\n", display, link)
+	}
+	if extra := len(locs) - limit; extra > 0 {
+		fmt.Fprintf(b, "- _and %d more_\n", extra)
+	}
+}
+
+// buildFileLink returns a file:// URL with the 1-indexed line number as
+// the fragment. If the input uri is malformed it is returned unchanged.
+func buildFileLink(uri string, line uint32) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+	u.Fragment = fmt.Sprintf("%d", line)
+	return u.String()
 }
 
 func countLabel(n int, noun string) string {
@@ -115,25 +167,3 @@ func countLabel(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-// referenceCount asks gopls for references at (uri, pos) excluding the
-// declaration itself and returns the count. Returns -1 on error/timeout so
-// the caller can distinguish "unknown" from "none". Shares the resolve
-// cache with code-lens resolution so repeated queries are free.
-func (p *Proxy) referenceCount(ctx context.Context, uri protocol.DocumentURI, pos protocol.Position) int {
-	locs := p.fetchReferences(ctx, uri, pos)
-	if locs == nil {
-		return -1
-	}
-	return len(locs)
-}
-
-// implementationCount mirrors referenceCount for textDocument/implementation.
-// Returns -1 on error and 0 when gopls replies with an empty set (which is
-// the common case on positions that are not interface-related).
-func (p *Proxy) implementationCount(ctx context.Context, uri protocol.DocumentURI, pos protocol.Position) int {
-	locs := p.fetchImplementations(ctx, uri, pos)
-	if locs == nil {
-		return -1
-	}
-	return len(locs)
-}
