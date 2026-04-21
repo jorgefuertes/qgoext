@@ -66,4 +66,7 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+## Language 
+
+- All the code and comments will be writen in English.
+- All the communication with the user should be done in Spanish.

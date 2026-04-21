@@ -1,6 +1,6 @@
 id = "qgoext"
 name = "qgoext"
-version = "0.1.4"
+version = "0.1.5"
 schema_version = 1
 authors = ["Jorge Fuertes <jorge1.fuertes@volkswagen-groupservices.com>"]
 description = "gopls proxy that enriches hover and code lens with reference and implementation counts."

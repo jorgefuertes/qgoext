@@ -249,12 +249,14 @@ func (p *Proxy) resolveOurLens(ctx context.Context, lens *protocol.CodeLens, dat
 	}
 
 	noun := "reference"
+	cmdName := qgoextShowReferences
 	if data.Kind == lensKindImplementations {
 		noun = "implementation"
+		cmdName = qgoextShowImplementations
 	}
 	lens.Command = &protocol.Command{
 		Title:   countLabel(len(locations), noun),
-		Command: "editor.action.showReferences",
+		Command: cmdName,
 		Arguments: []any{
 			data.URI,
 			pos,

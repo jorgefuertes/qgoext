@@ -50,6 +50,10 @@ type Proxy struct {
 	resolved *resolveCache
 	prewarm  *prewarmer
 
+	// initID remembers the editor's initialize request ID so the response
+	// from gopls can be detected and rewritten with our extra commands.
+	initID initializeRequestID
+
 	// Parent context for out-of-band workers (prewarm, cache fills). Set by
 	// Run; nil before that.
 	bgCtx context.Context
@@ -139,6 +143,9 @@ func (p *Proxy) pumpGoplsToEditor(ctx context.Context) error {
 		if err := json.Unmarshal(body, &peek); err == nil && peek.isResponse() {
 			if id, ok := stringID(peek.ID); ok && p.takePending(id, &peek) {
 				continue
+			}
+			if p.initID.matches(peek.ID) {
+				body = rewriteInitializeResponse(body)
 			}
 		}
 		if err := p.sendToEditor(body); err != nil {

@@ -14,6 +14,10 @@ func (p *Proxy) observeFromEditor(body []byte) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return
 	}
+	if m.isRequest() && m.Method == protocol.MethodInitialize {
+		p.rememberInitializeID(m.ID)
+		return
+	}
 	if !m.isNotification() {
 		return
 	}
