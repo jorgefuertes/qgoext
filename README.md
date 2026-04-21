@@ -7,7 +7,9 @@ Zed extension that enriches `gopls` hover tooltips and code-lens entries with re
 When editing Go in Zed:
 
 - **Hover**: tooltips gain a line like `5 references · 2 implementations` under the usual hover content.
-- **Quick actions**: the code-lens menu (merged in Zed via PR #26848) gains entries such as `5 references` and `2 implementations` that jump to the matching location when selected.
+- **Quick actions**: the code-lens menu (merged in Zed via PR #26848) gains entries such as `5 references` and `2 implementations` that show the count directly in the title.
+
+> **Navigation note**: the quick-actions entries are display-only. Zed does not expose a language-server command that opens the references panel, so selecting an entry is a no-op. To navigate, use Zed's built-in `editor: find all references` (palette or keybinding) on the same symbol.
 
 Both features are fed by a small Go proxy that sits between Zed and the real `gopls`, intercepting only `textDocument/hover` and `textDocument/codeLens` and forwarding everything else unchanged.
 
@@ -23,6 +25,18 @@ Pre-alpha. MVP scope: functions, methods, structs, interfaces, top-level consts 
 ## Installation
 
 Not yet published. For now: clone the repo and install as a dev extension via *Zed → Extensions → Install Dev Extension*.
+
+Then add to `settings.json` so Zed stops launching the built-in gopls alongside qgoext's proxy (otherwise hovers appear duplicated):
+
+```jsonc
+{
+  "languages": {
+    "Go": {
+      "language_servers": ["qgoext", "!gopls"]
+    }
+  }
+}
+```
 
 ## License
 

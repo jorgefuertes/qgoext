@@ -142,7 +142,13 @@ func lensWorthy(path []protocol.DocumentSymbol) bool {
 		protocol.SymbolKindInterface, protocol.SymbolKindConstant,
 		protocol.SymbolKindVariable:
 		return len(path) == 1
-	case protocol.SymbolKindMethod, protocol.SymbolKindField:
+	case protocol.SymbolKindMethod:
+		// Accept methods anywhere in the tree. Some gopls versions nest
+		// them under their receiver struct; others return methods at the
+		// top level with the receiver embedded in the name. The lens is
+		// meaningful in both cases.
+		return true
+	case protocol.SymbolKindField:
 		if len(path) < 2 {
 			return false
 		}
@@ -178,11 +184,17 @@ func buildLens(uri protocol.DocumentURI, s protocol.DocumentSymbol, kind lensKin
 		Source:    qgoextSource,
 		Kind:      kind,
 		URI:       uri,
+		// The reference / implementation query needs the exact identifier
+		// position; the range covering the whole declaration body is used
+		// only to tell Zed where the lens is applicable in the editor.
 		Line:      s.SelectionRange.Start.Line,
 		Character: s.SelectionRange.Start.Character,
 	}
+	// Use the full declaration range so Zed surfaces the lens anywhere
+	// inside the function / struct / interface body, not just when the
+	// cursor happens to land on the identifier itself.
 	return protocol.CodeLens{
-		Range: s.SelectionRange,
+		Range: s.Range,
 		Data:  data,
 	}
 }
