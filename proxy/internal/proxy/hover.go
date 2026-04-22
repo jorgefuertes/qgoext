@@ -5,18 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"go.lsp.dev/protocol"
 )
-
-// hoverLinkLimit caps how many file links are inlined into the hover tail
-// per category. Keeping this small keeps tooltips usable; navigation to
-// unlisted entries can still be done with Zed's built-in find-all-references.
-const hoverLinkLimit = 12
 
 // enrichBudget bounds how long we wait for the parallel reference and
 // implementation sub-requests. The base hover is not bound by this; gopls
@@ -45,10 +39,6 @@ func (p *Proxy) handleHover(ctx context.Context, req *message) {
 	p.sendResultResponse(req.ID, enriched)
 }
 
-// enrichHoverPayload takes the raw Result bytes from gopls' hover response
-// and returns a new Result with an appended counts line. If the base
-// response is null or undecodable the original bytes are returned unchanged
-// so the editor still sees something useful.
 func enrichHoverPayload(
 	ctx context.Context,
 	p *Proxy,
@@ -96,13 +86,13 @@ func enrichHoverPayload(
 }
 
 // formatHoverTail renders the markdown appended after the gopls hover
-// content. The tail is empty when both queries failed or returned nothing.
+// content: a single line with the reference and implementation counts.
+// Each count is wrapped in a markdown link pointing to the first location
+// of its kind (the only form of navigation Zed's hover renderer supports —
+// file:// URLs with a line fragment, via editor::hover_popover::open_markdown_url).
 //
-// Layout: a one-line summary with bold counts, then up to hoverLinkLimit
-// clickable links per category. The links use file:// URIs with the
-// 1-indexed line number as the URL fragment, the only navigation form
-// Zed's hover renderer recognises (see editor::hover_popover::open_markdown_url
-// in zed-industries/zed).
+// If a category's query failed or returned no locations, that slot
+// degrades to plain bold text without a link.
 func formatHoverTail(refs, impls []protocol.Location) string {
 	hasRefs := refs != nil
 	hasImpls := impls != nil
@@ -110,43 +100,29 @@ func formatHoverTail(refs, impls []protocol.Location) string {
 		return ""
 	}
 
-	var b strings.Builder
-	b.WriteString("\n\n---\n")
-	parts := []string{}
+	var parts []string
 	if hasRefs {
-		parts = append(parts, fmt.Sprintf("**%s**", countLabel(len(refs), "reference")))
+		parts = append(parts, formatCountLink(refs, "reference"))
 	}
 	if hasImpls && len(impls) > 0 {
-		parts = append(parts, fmt.Sprintf("**%s**", countLabel(len(impls), "implementation")))
+		parts = append(parts, formatCountLink(impls, "implementation"))
 	}
-	b.WriteString(strings.Join(parts, " · "))
-
-	if hasRefs && len(refs) > 0 {
-		b.WriteString("\n\n**References**\n")
-		writeLocationList(&b, refs)
+	if len(parts) == 0 {
+		return ""
 	}
-	if hasImpls && len(impls) > 0 {
-		b.WriteString("\n\n**Implementations**\n")
-		writeLocationList(&b, impls)
-	}
-	return b.String()
+	return "\n\n---\n" + strings.Join(parts, " · ")
 }
 
-func writeLocationList(b *strings.Builder, locs []protocol.Location) {
-	limit := hoverLinkLimit
-	if len(locs) < limit {
-		limit = len(locs)
+// formatCountLink returns the bold count, wrapped in a link to the first
+// location when at least one exists; otherwise plain bold text.
+func formatCountLink(locs []protocol.Location, noun string) string {
+	label := countLabel(len(locs), noun)
+	if len(locs) == 0 {
+		return fmt.Sprintf("**%s**", label)
 	}
-	for i := 0; i < limit; i++ {
-		loc := locs[i]
-		path := filepath.FromSlash(loc.URI.Filename())
-		display := fmt.Sprintf("%s:%d", filepath.Base(path), loc.Range.Start.Line+1)
-		link := buildFileLink(string(loc.URI), loc.Range.Start.Line+1)
-		fmt.Fprintf(b, "- [%s](%s)\n", display, link)
-	}
-	if extra := len(locs) - limit; extra > 0 {
-		fmt.Fprintf(b, "- _and %d more_\n", extra)
-	}
+	first := locs[0]
+	link := buildFileLink(string(first.URI), first.Range.Start.Line+1)
+	return fmt.Sprintf("[**%s**](%s)", label, link)
 }
 
 // buildFileLink returns a file:// URL with the 1-indexed line number as
@@ -167,3 +143,80 @@ func countLabel(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
+// fetchReferences returns locations for the references at (uri, pos),
+// excluding the declaration. Results are memoised per (uri, pos) until the
+// file is edited. Nil signals "unknown" (error, timeout, or throttle
+// cancellation); an empty slice means "zero". Access is gated by the shared
+// semaphore to keep gopls responsive under burst loads.
+func (p *Proxy) fetchReferences(ctx context.Context, uri protocol.DocumentURI, pos protocol.Position) []protocol.Location {
+	key := locCacheKey{Line: pos.Line, Character: pos.Character, Kind: queryReferences}
+	if locs, ok := p.resolved.get(uri, key); ok {
+		return locs
+	}
+	release, err := p.throttle.acquire(ctx)
+	if err != nil {
+		return nil
+	}
+	defer release()
+
+	params := protocol.ReferenceParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     pos,
+		},
+		Context: protocol.ReferenceContext{IncludeDeclaration: false},
+	}
+	resp, err := p.call(ctx, protocol.MethodTextDocumentReferences, params)
+	if err != nil || len(resp.Error) > 0 {
+		return nil
+	}
+	locs := []protocol.Location{}
+	if len(resp.Result) > 0 && string(resp.Result) != "null" {
+		if err := json.Unmarshal(resp.Result, &locs); err != nil {
+			return nil
+		}
+	}
+	p.resolved.put(uri, key, locs)
+	return locs
+}
+
+// fetchImplementations mirrors fetchReferences for
+// textDocument/implementation. Same caching and throttle apply.
+func (p *Proxy) fetchImplementations(ctx context.Context, uri protocol.DocumentURI, pos protocol.Position) []protocol.Location {
+	key := locCacheKey{Line: pos.Line, Character: pos.Character, Kind: queryImplementations}
+	if locs, ok := p.resolved.get(uri, key); ok {
+		return locs
+	}
+	release, err := p.throttle.acquire(ctx)
+	if err != nil {
+		return nil
+	}
+	defer release()
+
+	params := protocol.ImplementationParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     pos,
+		},
+	}
+	resp, err := p.call(ctx, protocol.MethodTextDocumentImplementation, params)
+	if err != nil || len(resp.Error) > 0 {
+		return nil
+	}
+	if len(resp.Result) == 0 || string(resp.Result) == "null" {
+		p.resolved.put(uri, key, []protocol.Location{})
+		return []protocol.Location{}
+	}
+	var locs []protocol.Location
+	if err := json.Unmarshal(resp.Result, &locs); err == nil {
+		p.resolved.put(uri, key, locs)
+		return locs
+	}
+	var single protocol.Location
+	if err := json.Unmarshal(resp.Result, &single); err == nil {
+		out := []protocol.Location{single}
+		p.resolved.put(uri, key, out)
+		return out
+	}
+	return nil
+}
